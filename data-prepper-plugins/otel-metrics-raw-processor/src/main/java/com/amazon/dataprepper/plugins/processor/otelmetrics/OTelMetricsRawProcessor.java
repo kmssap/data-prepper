@@ -20,8 +20,10 @@ import com.amazon.dataprepper.model.processor.AbstractProcessor;
 import com.amazon.dataprepper.model.processor.Processor;
 import com.amazon.dataprepper.model.record.Record;
 import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest;
+
 import io.opentelemetry.proto.metrics.v1.InstrumentationLibraryMetrics;
 import io.opentelemetry.proto.metrics.v1.ResourceMetrics;
+import io.opentelemetry.proto.metrics.v1.ScopeMetrics;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -49,21 +51,30 @@ public class OTelMetricsRawProcessor extends AbstractProcessor<Record<ExportMetr
 
                 for (InstrumentationLibraryMetrics is : rs.getInstrumentationLibraryMetricsList()) {
                     final Map<String, Object> ils = OTelMetricsProtoHelper.getInstrumentationLibraryAttributes(is.getInstrumentationLibrary());
-                    for (io.opentelemetry.proto.metrics.v1.Metric metric : is.getMetricsList()) {
-                        if (metric.hasGauge()) {
-                            recordsOut.addAll(mapGauge(metric, serviceName,  ils, resourceAttributes));
-                        } else
-                        if (metric.hasSum()) {
-                            recordsOut.addAll(mapSum(metric, serviceName, ils, resourceAttributes));
-                        } else
-                        if (metric.hasSummary()) {
-                            recordsOut.addAll(mapSummary(metric, serviceName, ils, resourceAttributes));
-                        } else
-                        if (metric.hasHistogram()) {
-                            recordsOut.addAll(mapHistogram(metric, serviceName, ils, resourceAttributes));
-                        }
-                    }
+                    recordsOut.addAll(processMetricsList(is.getMetricsList(), serviceName, ils, resourceAttributes));
                 }
+
+                for (ScopeMetrics sm : rs.getScopeMetricsList()) {
+                    final Map<String, Object> ils = OTelMetricsProtoHelper.getInstrumentationScopeAttributes(sm.getScope());
+                    recordsOut.addAll(processMetricsList(sm.getMetricsList(), serviceName, ils, resourceAttributes));
+                }
+
+            }
+        }
+        return recordsOut;
+    }
+
+    private List<? extends Record<? extends Metric>> processMetricsList(final List<io.opentelemetry.proto.metrics.v1.Metric> metricsList, final String serviceName, final Map<String, Object> ils, final Map<String, Object> resourceAttributes) {
+        List<Record<? extends Metric>> recordsOut = new ArrayList<>();
+        for (io.opentelemetry.proto.metrics.v1.Metric metric : metricsList) {
+            if (metric.hasGauge()) {
+                recordsOut.addAll(mapGauge(metric, serviceName, ils, resourceAttributes));
+            } else if (metric.hasSum()) {
+                recordsOut.addAll(mapSum(metric, serviceName, ils, resourceAttributes));
+            } else if (metric.hasSummary()) {
+                recordsOut.addAll(mapSummary(metric, serviceName, ils, resourceAttributes));
+            } else if (metric.hasHistogram()) {
+                recordsOut.addAll(mapHistogram(metric, serviceName, ils, resourceAttributes));
             }
         }
         return recordsOut;
