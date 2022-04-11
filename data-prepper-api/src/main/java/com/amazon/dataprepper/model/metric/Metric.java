@@ -7,6 +7,7 @@ package com.amazon.dataprepper.model.metric;
 
 import com.amazon.dataprepper.model.event.Event;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -96,5 +97,13 @@ public interface Metric extends Event {
      * @since 1.4
      */
     String getSchemaUrl();
+
+    /**
+     * Gets the associated exemplars for this metric event.
+     *
+     * @return the exemplars
+     * @since 1.4
+     */
+    List<? extends Exemplar> getExemplars();
 
 }
