@@ -5,14 +5,10 @@
 
 package com.amazon.dataprepper.plugins.processor.otelmetrics;
 
-import com.fasterxml.jackson.annotation.JsonProperty;
-
 public class OtelMetricsRawProcessorConfig {
 
-    @JsonProperty("calculateHistogramBuckets")
     private Boolean calculateHistogramBuckets = false;
 
-    @JsonProperty("calculateExponentialHistogramBuckets")
     private Boolean calculateExponentialHistogramBuckets = false;
 
     public Boolean getCalculateExponentialHistogramBuckets() {
