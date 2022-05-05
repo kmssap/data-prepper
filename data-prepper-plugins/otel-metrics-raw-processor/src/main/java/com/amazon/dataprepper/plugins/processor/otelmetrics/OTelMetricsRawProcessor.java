@@ -7,6 +7,7 @@ package com.amazon.dataprepper.plugins.processor.otelmetrics;
 
 import com.amazon.dataprepper.model.annotations.DataPrepperPlugin;
 import com.amazon.dataprepper.model.annotations.DataPrepperPluginConstructor;
+import com.amazon.dataprepper.model.configuration.PipelineModel;
 import com.amazon.dataprepper.model.configuration.PluginSetting;
 import com.amazon.dataprepper.model.metric.JacksonExponentialHistogram;
 import com.amazon.dataprepper.model.metric.JacksonGauge;
@@ -22,6 +23,8 @@ import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest;
 import io.opentelemetry.proto.metrics.v1.InstrumentationLibraryMetrics;
 import io.opentelemetry.proto.metrics.v1.ResourceMetrics;
 import io.opentelemetry.proto.metrics.v1.ScopeMetrics;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -33,6 +36,8 @@ import java.util.stream.Collectors;
 
 @DataPrepperPlugin(name = "otel_metrics_raw_processor", pluginType = Processor.class, pluginConfigurationType = OtelMetricsRawProcessorConfig.class)
 public class OTelMetricsRawProcessor extends AbstractProcessor<Record<ExportMetricsServiceRequest>, Record<? extends Metric>> {
+
+    private static final Logger LOG = LoggerFactory.getLogger(OTelMetricsRawProcessor.class);
 
     private final OtelMetricsRawProcessorConfig otelMetricsRawProcessorConfig;
 
@@ -222,6 +227,14 @@ public class OTelMetricsRawProcessor extends AbstractProcessor<Record<ExportMetr
 
     private List<? extends Record<? extends Metric>> mapExponentialHistogram(io.opentelemetry.proto.metrics.v1.Metric metric, String serviceName, Map<String, Object> ils, Map<String, Object> resourceAttributes, String schemaUrl) {
         return metric.getExponentialHistogram().getDataPointsList().stream()
+                .filter(dp -> {
+                    if (otelMetricsRawProcessorConfig.getExponentialHistogramMaxAllowedScale() < Math.abs(dp.getScale())){
+                        LOG.error("Exponential histogram can not be processed since its scale of {} is bigger than the configured max of {}.", dp.getScale(), otelMetricsRawProcessorConfig.getExponentialHistogramMaxAllowedScale());
+                        return false;
+                    } else {
+                        return true;
+                    }
+                })
                 .map(dp -> {
                     JacksonExponentialHistogram.Builder builder = JacksonExponentialHistogram.builder()
                             .withUnit(metric.getUnit())
