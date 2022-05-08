@@ -7,7 +7,6 @@ package com.amazon.dataprepper.plugins.processor.otelmetrics;
 
 import com.amazon.dataprepper.model.annotations.DataPrepperPlugin;
 import com.amazon.dataprepper.model.annotations.DataPrepperPluginConstructor;
-import com.amazon.dataprepper.model.configuration.PipelineModel;
 import com.amazon.dataprepper.model.configuration.PluginSetting;
 import com.amazon.dataprepper.model.metric.JacksonExponentialHistogram;
 import com.amazon.dataprepper.model.metric.JacksonGauge;
@@ -228,7 +227,8 @@ public class OTelMetricsRawProcessor extends AbstractProcessor<Record<ExportMetr
     private List<? extends Record<? extends Metric>> mapExponentialHistogram(io.opentelemetry.proto.metrics.v1.Metric metric, String serviceName, Map<String, Object> ils, Map<String, Object> resourceAttributes, String schemaUrl) {
         return metric.getExponentialHistogram().getDataPointsList().stream()
                 .filter(dp -> {
-                    if (otelMetricsRawProcessorConfig.getExponentialHistogramMaxAllowedScale() < Math.abs(dp.getScale())){
+                    if (otelMetricsRawProcessorConfig.getCalculateExponentialHistogramBuckets() &&
+                            otelMetricsRawProcessorConfig.getExponentialHistogramMaxAllowedScale() < Math.abs(dp.getScale())){
                         LOG.error("Exponential histogram can not be processed since its scale of {} is bigger than the configured max of {}.", dp.getScale(), otelMetricsRawProcessorConfig.getExponentialHistogramMaxAllowedScale());
                         return false;
                     } else {
