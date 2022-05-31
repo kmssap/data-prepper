@@ -3,5 +3,4 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 
-com.linecorp.armeria.internal.client.grpc.protocol.UnaryGrpcClientFactoryProvider
 com.linecorp.armeria.internal.client.grpc.GrpcClientFactoryProvider
