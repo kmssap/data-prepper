@@ -5,13 +5,18 @@
 
 package com.amazon.dataprepper.parser.config;
 
+import com.amazon.dataprepper.DataPrepper;
+import com.amazon.dataprepper.meter.EMFLoggingMeterRegistry;
+import com.amazon.dataprepper.metrics.MetricNames;
 import com.amazon.dataprepper.parser.model.DataPrepperConfiguration;
 import com.amazon.dataprepper.parser.model.MetricRegistryType;
 import com.amazon.dataprepper.pipeline.server.CloudWatchMeterRegistryProvider;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import io.micrometer.cloudwatch2.CloudWatchMeterRegistry;
+import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.binder.MeterBinder;
 import io.micrometer.core.instrument.binder.jvm.ClassLoaderMetrics;
 import io.micrometer.core.instrument.binder.jvm.JvmGcMetrics;
@@ -22,13 +27,21 @@ import io.micrometer.core.instrument.composite.CompositeMeterRegistry;
 import io.micrometer.prometheus.PrometheusMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
+import java.util.function.Function;
+import java.util.stream.Stream;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.isA;
 import static org.hamcrest.Matchers.nullValue;
@@ -149,6 +162,55 @@ class MetricsConfigTest {
     }
 
     @Test
+    public void testGivenConfigWithEMFLoggingMeterRegistryThenMeterRegistryCreated() {
+        final DataPrepperConfiguration dataPrepperConfiguration = mock(DataPrepperConfiguration.class);
+
+        when(dataPrepperConfiguration.getMetricRegistryTypes())
+                .thenReturn(Collections.singletonList(MetricRegistryType.EmbeddedMetricsFormat));
+
+        final MeterRegistry meterRegistry = metricsConfig.emfLoggingMeterRegistry(dataPrepperConfiguration);
+        final Counter counter = meterRegistry.counter("counter");
+        final List<Tag> commonTags = counter.getId().getConventionTags(meterRegistry.config().namingConvention());
+
+        assertThat(meterRegistry, isA(EMFLoggingMeterRegistry.class));
+        assertThat(commonTags.size(), equalTo(1));
+        final Tag commonTag = commonTags.get(0);
+        assertThat(commonTag.getKey(), equalTo(MetricNames.SERVICE_NAME));
+        assertThat(commonTag.getValue(), equalTo(DataPrepper.getServiceNameForMetrics()));
+    }
+
+    @ParameterizedTest
+    @MethodSource("provideMetricRegistryTypesAndCreators")
+    public void testGivenConfigWithMetricTagsThenMeterRegistryConfigured(final MetricRegistryType metricRegistryType,
+                                                                         final Function<DataPrepperConfiguration, MeterRegistry> creator) {
+        final String testKey = "testKey";
+        final String testValue = "testValue";
+        final String testServiceName = "testServiceName";
+        final DataPrepperConfiguration dataPrepperConfiguration = mock(DataPrepperConfiguration.class);
+        when(dataPrepperConfiguration.getMetricRegistryTypes()).thenReturn(Collections.singletonList(metricRegistryType));
+        when(dataPrepperConfiguration.getMetricTags()).thenReturn(Map.of(testKey, testValue));
+
+        MeterRegistry meterRegistry = creator.apply(dataPrepperConfiguration);
+        Counter counter = meterRegistry.counter("counter");
+        List<Tag> commonTags = counter.getId().getConventionTags(meterRegistry.config().namingConvention());
+
+        assertThat(commonTags, equalTo(
+                Arrays.asList(
+                        Tag.of(MetricNames.SERVICE_NAME, DataPrepper.getServiceNameForMetrics()),
+                        Tag.of(testKey, testValue))
+        ));
+
+        when(dataPrepperConfiguration.getMetricRegistryTypes()).thenReturn(Collections.singletonList(metricRegistryType));
+        when(dataPrepperConfiguration.getMetricTags()).thenReturn(Map.of(MetricNames.SERVICE_NAME, testServiceName));
+
+        meterRegistry = creator.apply(dataPrepperConfiguration);
+        counter = meterRegistry.counter("counter");
+        commonTags = counter.getId().getConventionTags(meterRegistry.config().namingConvention());
+
+        assertThat(commonTags, equalTo(List.of(Tag.of(MetricNames.SERVICE_NAME, testServiceName))));
+    }
+
+    @Test
     public void testGivenListOfMeterBindersWhenSystemMeterRegistryThenAllMeterBindersRegistered() {
         final Random r = new Random();
         final int copies = r.nextInt(10) + 5;
@@ -178,5 +240,12 @@ class MetricsConfigTest {
                 meterRegistries);
 
         assertThat(meterRegistry, isA(CompositeMeterRegistry.class));
+    }
+
+    private static Stream<Arguments> provideMetricRegistryTypesAndCreators() {
+        return Stream.of(
+                Arguments.of(MetricRegistryType.EmbeddedMetricsFormat, (Function<DataPrepperConfiguration, MeterRegistry>) metricsConfig::emfLoggingMeterRegistry),
+                Arguments.of(MetricRegistryType.Prometheus, (Function<DataPrepperConfiguration, MeterRegistry>) metricsConfig::prometheusMeterRegistry)
+        );
     }
 }

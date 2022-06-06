@@ -11,17 +11,25 @@ import com.amazon.dataprepper.model.event.Event;
 import com.amazon.dataprepper.model.record.Record;
 import com.amazon.dataprepper.model.sink.AbstractSink;
 import com.amazon.dataprepper.model.sink.Sink;
+import com.amazon.dataprepper.plugins.sink.opensearch.bulk.AccumulatingBulkRequest;
+import com.amazon.dataprepper.plugins.sink.opensearch.bulk.BulkOperationWriter;
+import com.amazon.dataprepper.plugins.sink.opensearch.bulk.JavaClientAccumulatingBulkRequest;
+import com.amazon.dataprepper.plugins.sink.opensearch.bulk.PreSerializedJsonpMapper;
+import com.amazon.dataprepper.plugins.sink.opensearch.bulk.SerializedJson;
 import com.amazon.dataprepper.plugins.sink.opensearch.index.IndexManager;
 import com.amazon.dataprepper.plugins.sink.opensearch.index.IndexManagerFactory;
 import com.amazon.dataprepper.plugins.sink.opensearch.index.IndexType;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.Timer;
-import org.opensearch.action.DocWriteRequest;
-import org.opensearch.action.bulk.BulkRequest;
-import org.opensearch.action.index.IndexRequest;
-import org.opensearch.client.RequestOptions;
 import org.opensearch.client.RestHighLevelClient;
+import org.opensearch.client.opensearch.OpenSearchClient;
+import org.opensearch.client.opensearch.core.BulkRequest;
+import org.opensearch.client.opensearch.core.bulk.BulkOperation;
+import org.opensearch.client.opensearch.core.bulk.IndexOperation;
+import org.opensearch.client.transport.OpenSearchTransport;
+import org.opensearch.client.transport.rest_client.RestClientTransport;
 import org.opensearch.common.unit.ByteSizeUnit;
 import org.opensearch.common.xcontent.LoggingDeprecationHandler;
 import org.opensearch.common.xcontent.NamedXContentRegistry;
@@ -38,7 +46,6 @@ import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.Collection;
 import java.util.Map;
-import java.util.Optional;
 import java.util.function.Supplier;
 
 @DataPrepperPlugin(name = "opensearch", pluginType = Sink.class)
@@ -48,15 +55,13 @@ public class OpenSearchSink extends AbstractSink<Record<Object>> {
   public static final String BULKREQUEST_SIZE_BYTES = "bulkRequestSizeBytes";
 
   private static final Logger LOG = LoggerFactory.getLogger(OpenSearchSink.class);
-  // Pulled from BulkRequest to make estimation of bytes consistent
-  private static final int REQUEST_OVERHEAD = 50;
 
   private BufferedWriter dlqWriter;
   private final OpenSearchSinkConfiguration openSearchSinkConfig;
   private final IndexManagerFactory indexManagerFactory;
   private RestHighLevelClient restHighLevelClient;
   private IndexManager indexManager;
-  private Supplier<BulkRequest> bulkRequestSupplier;
+  private Supplier<AccumulatingBulkRequest> bulkRequestSupplier;
   private BulkRetryStrategy bulkRetryStrategy;
   private final long bulkSize;
   private final IndexType indexType;
@@ -65,6 +70,8 @@ public class OpenSearchSink extends AbstractSink<Record<Object>> {
   private final Timer bulkRequestTimer;
   private final Counter bulkRequestErrorsCounter;
   private final DistributionSummary bulkRequestSizeBytesSummary;
+  private OpenSearchClient openSearchClient;
+  private ObjectMapper objectMapper;
 
   public OpenSearchSink(final PluginSetting pluginSetting) {
     super(pluginSetting);
@@ -90,24 +97,24 @@ public class OpenSearchSink extends AbstractSink<Record<Object>> {
     LOG.info("Initializing OpenSearch sink");
     restHighLevelClient = openSearchSinkConfig.getConnectionConfiguration().createClient();
     indexManager = indexManagerFactory.getIndexManager(indexType, restHighLevelClient, openSearchSinkConfig);
-    final boolean isISMEnabled = indexManager.checkISMEnabled();
-    final Optional<String> policyIdOptional = isISMEnabled ? indexManager.checkAndCreatePolicy() :
-            Optional.empty();
-    if (!openSearchSinkConfig.getIndexConfiguration().getIndexTemplate().isEmpty()) {
-      indexManager.checkAndCreateIndexTemplate(isISMEnabled, policyIdOptional.orElse(null));
-    }
     final String dlqFile = openSearchSinkConfig.getRetryConfiguration().getDlqFile();
     if (dlqFile != null) {
       dlqWriter = Files.newBufferedWriter(Paths.get(dlqFile), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
     }
-    indexManager.checkAndCreateIndex();
-    bulkRequestSupplier = () -> new BulkRequest(indexManager.getIndexAlias());
+
+    indexManager.setupIndex();
+
+    OpenSearchTransport transport = new RestClientTransport(restHighLevelClient.getLowLevelClient(), new PreSerializedJsonpMapper());
+    openSearchClient = new OpenSearchClient(transport);
+    bulkRequestSupplier = () -> new JavaClientAccumulatingBulkRequest(new BulkRequest.Builder().index(indexManager.getIndexAlias()));
     bulkRetryStrategy = new BulkRetryStrategy(
-            bulkRequest -> restHighLevelClient.bulk(bulkRequest, RequestOptions.DEFAULT),
+            bulkRequest -> openSearchClient.bulk(bulkRequest.getRequest()),
             this::logFailure,
             pluginMetrics,
             bulkRequestSupplier);
     LOG.info("Initialized OpenSearch sink");
+
+    objectMapper = new ObjectMapper();
   }
 
   @Override
@@ -115,29 +122,44 @@ public class OpenSearchSink extends AbstractSink<Record<Object>> {
     if (records.isEmpty()) {
       return;
     }
-    BulkRequest bulkRequest = bulkRequestSupplier.get();
+
+
+
+    AccumulatingBulkRequest<BulkOperation, BulkRequest> bulkRequest = bulkRequestSupplier.get();
     for (final Record<Object> record : records) {
-      final String document = getDocument(record.getData());
-      final IndexRequest indexRequest = new IndexRequest().source(document, XContentType.JSON);
+      final SerializedJson document = getDocument(record.getData());
+
+      final IndexOperation.Builder<Object> indexOperationBuilder = new IndexOperation.Builder<>()
+              .index(indexManager.getIndexAlias())
+              .document(document);
+
+
+      final Map documentAsMap;
       try {
-        final Map<String, Object> source = getMapFromJson(document);
-        final String docId = (String) source.get(documentIdField);
-        if (docId != null) {
-          indexRequest.id(docId);
-        }
-        final long estimatedBytesBeforeAdd = bulkRequest.estimatedSizeInBytes() + calcEstimatedSizeInBytes(indexRequest);
-        if (bulkSize >= 0 && estimatedBytesBeforeAdd >= bulkSize && bulkRequest.numberOfActions() > 0) {
-          flushBatch(bulkRequest);
-          bulkRequest = bulkRequestSupplier.get();
-        }
-        bulkRequest.add(indexRequest);
-      } catch (final IOException e) {
-        throw new RuntimeException(e.getMessage(), e);
+        documentAsMap = objectMapper.readValue(document.getSerializedJson(), Map.class);
+      } catch (IOException e) {
+        throw new RuntimeException(e);
       }
+      if(documentAsMap != null) {
+        final String docId = (String) documentAsMap.get(documentIdField);
+        if (docId != null) {
+          indexOperationBuilder.id(docId);
+        }
+      }
+      final BulkOperation indexBulkOperation = new BulkOperation.Builder()
+              .index(indexOperationBuilder.build())
+              .build();
+
+      final long estimatedBytesBeforeAdd = bulkRequest.estimateSizeInBytesWithDocument(indexBulkOperation);
+      if (bulkSize >= 0 && estimatedBytesBeforeAdd >= bulkSize && bulkRequest.getOperationsCount() > 0) {
+        flushBatch(bulkRequest);
+        bulkRequest = bulkRequestSupplier.get();
+      }
+      bulkRequest.addOperation(indexBulkOperation);
     }
 
     // Flush the remaining requests
-    if (bulkRequest.numberOfActions() > 0) {
+    if (bulkRequest.getOperationsCount() > 0) {
       flushBatch(bulkRequest);
     }
   }
@@ -145,26 +167,26 @@ public class OpenSearchSink extends AbstractSink<Record<Object>> {
 
   // Temporary function to support both trace and log ingestion pipelines.
   // TODO: This function should be removed with the completion of: https://github.com/opensearch-project/data-prepper/issues/546
-  private String getDocument(final Object object) {
+  private SerializedJson getDocument(final Object object) {
+    final String jsonString;
     if (object instanceof String) {
-      return (String) object;
+      jsonString = (String) object;
     } else if (object instanceof Event) {
-      return ((Event) object).toJsonString();
+      jsonString = ((Event) object).toJsonString();
+
     } else {
       throw new RuntimeException("Invalid record type. OpenSearch sink only supports String and Events");
     }
+
+    return SerializedJson.fromString(jsonString);
   }
 
-  private long calcEstimatedSizeInBytes(final IndexRequest indexRequest) {
-    // From BulkRequest#internalAdd(IndexRequest request)
-    return (indexRequest.source() != null ? indexRequest.source().length() : 0) + REQUEST_OVERHEAD;
-  }
-
-  private void flushBatch(final BulkRequest bulkRequest) {
+  private void flushBatch(AccumulatingBulkRequest accumulatingBulkRequest) {
     bulkRequestTimer.record(() -> {
       try {
-        bulkRetryStrategy.execute(bulkRequest);
-        bulkRequestSizeBytesSummary.record(bulkRequest.estimatedSizeInBytes());
+        LOG.info("Sending data to OpenSearch");
+        bulkRetryStrategy.execute(accumulatingBulkRequest);
+        bulkRequestSizeBytesSummary.record(accumulatingBulkRequest.getEstimatedSizeInBytes());
       } catch (final InterruptedException e) {
         LOG.error("Unexpected Interrupt:", e);
         bulkRequestErrorsCounter.increment();
@@ -179,22 +201,22 @@ public class OpenSearchSink extends AbstractSink<Record<Object>> {
     return parser.map();
   }
 
-  private void logFailure(final DocWriteRequest<?> docWriteRequest, final Throwable failure) {
+  private void logFailure(final BulkOperation bulkOperation, final Throwable failure) {
     if (dlqWriter != null) {
       try {
         dlqWriter.write(String.format("{\"Document\": [%s], \"failure\": %s}\n",
-                docWriteRequest.toString(), failure.getMessage()));
+                BulkOperationWriter.bulkOperationToString(bulkOperation), failure.getMessage()));
       } catch (final IOException e) {
-        LOG.error("DLQ failed for Document [{}]", docWriteRequest.toString());
+        LOG.error("DLQ failed for Document [{}]", bulkOperation.toString());
       }
     } else {
-      LOG.warn("Document [{}] has failure: {}", docWriteRequest.toString(), failure);
+      LOG.warn("Document [{}] has failure: {}", bulkOperation.toString(), failure);
     }
   }
 
   @Override
   public void shutdown() {
-    // Close the client
+    // Close the client. This closes the low-level client which will close it for both high-level clients.
     if (restHighLevelClient != null) {
       try {
         restHighLevelClient.close();

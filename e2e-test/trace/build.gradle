@@ -43,7 +43,7 @@ def SERVICE_MAP_PIPELINE_EVENT_TYPE_YAML = "service-map-e2e-pipeline-event-type.
 task createDataPrepperDockerFile(type: Dockerfile) {
     dependsOn copyDataPrepperJar
     destFile = project.file('build/docker/Dockerfile')
-    from("adoptopenjdk/openjdk14:jre-14.0.1_7-alpine")
+    from(dataPrepperBaseImage)
     exposePort(21890)
     exposePort(4900)
     workingDir("/app")
@@ -168,7 +168,7 @@ def createEndToEndTest(final String testName, final String includeTestsMatchPatt
         startDataPrepper2Task.mustRunAfter 'startOpenSearchDockerContainer'
         // wait for data-preppers to be ready
         doFirst {
-            sleep(10*1000)
+            sleep(15*1000)
         }
 
         description = 'Runs the raw span integration tests.'

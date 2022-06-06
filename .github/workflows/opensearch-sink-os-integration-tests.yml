@@ -9,8 +9,8 @@ jobs:
   integration-tests:
     strategy:
       matrix:
-        java: [14]
-        opensearch: [1.0.1, 1.1.0, 1.2.4, 1.3.0]
+        java: [11]
+        opensearch: [1.0.1, 1.1.0, 1.2.4, 1.3.2, 2.0.0]
 
     runs-on: ubuntu-latest
 
